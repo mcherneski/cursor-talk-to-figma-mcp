@@ -2776,6 +2776,8 @@ function connectToFigma(port: number = 3055) {
 
   ws.on("message", (data: any) => {
     try {
+      logger.debug(`Raw WebSocket data received: ${data}`);
+      
       // Define a more specific type with an index signature to allow any property access
       interface ProgressMessage {
         message: FigmaResponse | any;
@@ -2785,9 +2787,11 @@ function connectToFigma(port: number = 3055) {
       }
 
       const json = JSON.parse(data) as ProgressMessage;
+      logger.debug(`Parsed WebSocket JSON: ${JSON.stringify(json, null, 2)}`);
 
       // Handle progress updates
       if (json.type === 'progress_update') {
+        logger.debug(`Processing progress update for request ID: ${json.id}`);
         const progressData = json.message.data as CommandProgressUpdate;
         const requestId = json.id || '';
 
@@ -2827,15 +2831,15 @@ function connectToFigma(port: number = 3055) {
 
       // Handle regular responses
       const myResponse = json.message;
-      logger.debug(`Received message: ${JSON.stringify(myResponse)}`);
+      logger.debug(`Extracted message from JSON: ${JSON.stringify(myResponse, null, 2)}`);
       logger.log('myResponse' + JSON.stringify(myResponse));
 
       // Handle response to a request
       if (
         myResponse.id &&
-        pendingRequests.has(myResponse.id) &&
-        myResponse.result
+        pendingRequests.has(myResponse.id)
       ) {
+        logger.debug(`Found pending request for ID: ${myResponse.id}`);
         const request = pendingRequests.get(myResponse.id)!;
         clearTimeout(request.timeout);
 
@@ -2843,18 +2847,26 @@ function connectToFigma(port: number = 3055) {
           logger.error(`Error from Figma: ${myResponse.error}`);
           request.reject(new Error(myResponse.error));
         } else {
-          if (myResponse.result) {
-            request.resolve(myResponse.result);
-          }
+          // Resolve with the result, even if it's falsy (null, false, etc.)
+          // For join commands, the result might be undefined/null but that's still success
+          logger.debug(`Resolving request ${myResponse.id} with result: ${JSON.stringify(myResponse.result)}`);
+          request.resolve(myResponse.result);
         }
 
         pendingRequests.delete(myResponse.id);
+        logger.debug(`Removed request ${myResponse.id} from pending requests`);
       } else {
         // Handle broadcast messages or events
         logger.info(`Received broadcast message: ${JSON.stringify(myResponse)}`);
+        
+        // Add more specific logging for debugging
+        if (myResponse && typeof myResponse === 'object') {
+          logger.debug(`Broadcast message details - ID: ${myResponse.id}, Type: ${typeof myResponse.result}, Result: ${JSON.stringify(myResponse.result)}`);
+        }
       }
     } catch (error) {
       logger.error(`Error parsing message: ${error instanceof Error ? error.message : String(error)}`);
+      logger.error(`Raw data that caused error: ${data}`);
     }
   });
 
@@ -2917,21 +2929,32 @@ function sendCommandToFigma(
     }
 
     const id = uuidv4();
-    const request = {
-      id,
-      type: command === "join" ? "join" : "message",
-      ...(command === "join"
-        ? { channel: (params as any).channel }
-        : { channel: currentChannel }),
-      message: {
-        id,
-        command,
-        params: {
-          ...(params as any),
-          commandId: id, // Include the command ID in params
-        },
-      },
-    };
+    logger.debug(`Generated request ID: ${id}`);
+    logger.debug(`Command: ${command}, Params: ${JSON.stringify(params)}`);
+    
+    const request = command === "join" 
+      ? {
+          // Simple structure for join commands that socket server expects
+          id,
+          type: "join",
+          channel: (params as any).channel
+        }
+      : {
+          // Complex structure for regular commands
+          id,
+          type: "message",
+          channel: currentChannel,
+          message: {
+            id,
+            command,
+            params: {
+              ...(params as any),
+              commandId: id, // Include the command ID in params
+            },
+          },
+        };
+
+    logger.debug(`Constructed request object: ${JSON.stringify(request, null, 2)}`);
 
     // Set timeout for request
     const timeout = setTimeout(() => {
@@ -2952,7 +2975,7 @@ function sendCommandToFigma(
 
     // Send the request
     logger.info(`Sending command to Figma: ${command}`);
-    logger.debug(`Request details: ${JSON.stringify(request)}`);
+    logger.debug(`Final request being sent: ${JSON.stringify(request)}`);
     ws.send(JSON.stringify(request));
   });
 }
